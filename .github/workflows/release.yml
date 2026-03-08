@@ -1,0 +1,90 @@
+name: Neatify parser release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            os_name: linux
+            ext: so
+          - os: macos-14
+            os_name: macos
+            ext: dylib
+          - os: windows-latest
+            os_name: windows
+            ext: dll
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install tree-sitter CLI
+        run: npm install -g tree-sitter-cli@0.26.3
+      - name: Generate parser
+        working-directory: xml
+        run: tree-sitter generate
+      - name: Build shared library
+        shell: bash
+        working-directory: xml
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY##*/}"
+          lang="${repo#tree-sitter-}"
+          os="${{ matrix.os_name }}"
+          ext="${{ matrix.ext }}"
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64|amd64) arch="x86_64" ;;
+            aarch64|arm64) arch="aarch64" ;;
+            i686|i386) arch="i686" ;;
+          esac
+          mkdir -p build dist
+          cflags=(-I src -I ../common)
+          if [[ "$os" != "windows" ]]; then
+            cflags+=(-fPIC)
+          fi
+          cc_cmd="cc"
+          cxx_cmd="c++"
+          if [[ "$os" == "windows" ]]; then
+            if command -v clang >/dev/null 2>&1; then
+              cc_cmd="clang"
+              cxx_cmd="clang++"
+            fi
+          fi
+          "$cc_cmd" "${cflags[@]}" -c src/parser.c -o build/parser.o
+          objs=(build/parser.o)
+          if [[ -f src/scanner.c ]]; then
+            "$cc_cmd" "${cflags[@]}" -c src/scanner.c -o build/scanner.o
+            objs+=(build/scanner.o)
+          elif [[ -f src/scanner.cc ]]; then
+            "$cxx_cmd" "${cflags[@]}" -std=c++17 -c src/scanner.cc -o build/scanner.o
+            objs+=(build/scanner.o)
+          fi
+          if [[ "$os" == "macos" ]]; then
+            link_flags=(-dynamiclib)
+          else
+            link_flags=(-shared)
+          fi
+          link_cmd="$cc_cmd"
+          if [[ -f src/scanner.cc ]]; then
+            link_cmd="$cxx_cmd"
+          fi
+          out="dist/tree-sitter-${lang}-${os}-${arch}.${ext}"
+          "$link_cmd" "${link_flags[@]}" -o "$out" "${objs[@]}"
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
